@@ -1,0 +1,219 @@
+<#********************************************************************************************
+** Description        : Convert ORIN Spreadsheet into CSV (.DAT).
+**
+** Revision           : $Revision: 1.0 $
+**
+** Copyright          : (C) 2014 The Moda Companies
+**********************************************************************************************
+** History:
+**********************************************************************************************
+**    Date    | Pgmr   |    Description
+**********************************************************************************************
+** 04/22/2014  srinivs    Bug 31392 Create ORIN Automation PS to convert the Oldest File
+**                                  in the given ORN Look up directory into CSV file
+**                                  and move it to given EE Arrived Directory.
+********************************************************************************************#>
+
+# Parameter declaration Begins
+param(
+    [string]$eeFileTransferDir =""
+)
+# Parameter declaration Ends
+
+# Argument Handling Begins
+
+if ($eeFileTransferDir -eq "") 
+{
+	throw "Valid eeFileTransfer directory must be provided [Example: \\pdx\filetransfer\stg\ee] ";
+	exit;
+}
+
+if (-not (Test-Path $eeFileTransferDir)) 
+{
+    throw "eeFileTransfer Directory: '$eeFileTransferDir' does not exist.";
+    exit;
+}
+
+# Argument Handling Ends
+
+# Assign Source and Destination Directory Begins
+
+$orinFileSrcDir = $eeFileTransferDir.trim() + "\ORIN";
+$orinFileDstDir = $eeFileTransferDir.trim() + "\arrived";
+
+# Assign Source and Destination Directory Ends
+
+# Checking the validity of Source and Destination directories Begins
+if (-not (Test-Path $orinFileSrcDir)) 
+{
+    throw "Directory: '$orinFileSrcDir' does not exist."
+    Exit
+}
+
+if (-not (Test-Path $orinFileDstDir)) 
+{
+    throw "Directory: '$orinFileDstDir' does not exist."
+    Exit
+}
+
+Write-Host "Begin Date: $(Get-Date)";
+Write-Host "";
+
+# Checking the validity of Source and Destination directories Ends
+
+# Get all the XLS files in the given directory, and convert them into CSV
+$FILES = Get-Childitem $orinFileSrcDir *.xlsx | Sort-Object LastWriteTime | Where-Object { !($_.psiscontainer) } 
+
+if (-not ($FILES)) 
+{
+	Write-Host "No Files found to process.Exiting...";
+	exit;
+}
+
+Foreach ( $FILE In $FILES) 
+{
+	$SourceFile = $orinFileSrcDir + "\" + $FILE ;
+	$FileTimeStamp = $FILE.toString().Substring(14,14);
+
+    Write-Host "";
+    Write-Host "Processing:$FILE";
+    Write-Host "";
+	$CastFlag = "True";
+	$OpenFlag = "True";
+	
+	Try
+	{
+		$FileTimeStamp = [long]$FileTimeStamp;
+	}
+	Catch
+	{   
+		Write-Host "";
+		throw "Invalid-Time-stamp in FileName($FILE), Expected:(YYYYMMDDHHMMSS,FilenamePosition15-28) Please correct and re-try.." ;
+	}
+
+	# Create the .DAT file name in the source directory.
+	$WorkFileName = $orinFileSrcDir + "\" + "ORIN_PRP" + $FileTimeStamp.toString() + ".DAT";
+	$NewFileName  = $orinFileDstDir + "\" + "ORIN_PRP" + $FileTimeStamp.toString() + ".DAT";
+	$oleDbConn = New-Object System.Data.OleDb.OleDbConnection;
+	$oleDbCmd = New-Object System.Data.OleDb.OleDbCommand;
+	$oleDbAdapter = New-Object System.Data.OleDb.OleDbDataAdapter;
+	$dataTable = New-Object System.Data.DataTable;
+	$OleDbConn.ConnectionString = "Provider=Microsoft.ACE.OLEDB.12.0;Data Source=`"$SourceFile`";Extended Properties=`"Excel 12.0 Xml;HDR=YES`";";
+	
+	#Establish connection with XLS
+	Try
+	{
+		$oleDbConn.Open();		
+
+		$oleDbCmd.Connection = $OleDbConn;
+		$oleDbCmd.commandtext = “Select * from [Sheet1$]”;
+		$oleDbAdapter.SelectCommand = $OleDbCmd;
+		$ret=$oleDbAdapter.Fill($dataTable);
+		Write-Host	"Rows to be converted:$ret" -ForegroundColor green;	
+		$totOrinColumns = $dataTable.Columns.Count ;
+		Write-Host	 "Total ORIN Columns Found: $totOrinColumns, Expected No.Of Columns: 58";	
+		$oleDbConn.Close();	
+	}
+	Catch
+	{   
+		Write-Host "";
+		throw "There are Some issues with Connecting to EXCL and creating Local Data Table" ;
+	}
+	
+	# if the File is empty exit from the process.
+	if ($ret -eq 0)
+	{
+		throw "File:$FILE  is EMPTY.Exiting.Please correct and retry ";
+		exit;
+	}	
+	
+	# if the File does not have 58 columns exit.
+	if ($totOrinColumns -ne 58)
+	{
+		throw "File:$FILE should have 58 Columns, But It has only: $totOrinColumns Columns..Exiting...Please correct and retry ";
+		exit;
+	}	
+	
+	[int]$flagBlankCount = 0;
+	#Replace comma with blank space
+	Try
+	{
+		foreach($orinRow in $dataTable.Rows)
+		{
+			$flagBlankCount = 0;			
+			foreach($orinColumn in $dataTable.Columns)
+			{
+				$destColmnName  = $orinColumn.toString().Trim();
+				$srcColmnValue = $orinRow[$orinColumn].toString().Trim();
+				[void][bool]$srcColmnValue;
+				
+				## If all the 58 columns are empty, exit from the process Begins
+				if (!$srcColmnValue)
+				{
+					$flagBlankCount += 1;
+				}				
+				
+				if ($flagBlankCount -eq 58)
+				{
+					Write-Host "One or More Row(s) Empty in the File:$FILE ..Please correct and retry. Exiting... ";
+					exit;
+				}	
+				## If all the 58 columns are empty, exit from the process Begins				
+				
+				# Replace "," with a single blank space of each column, and trim it.
+				$destColmnValue = $orinRow[$orinColumn].toString().Replace(","," ").Trim();
+				# Modify the datable back after data correction.
+				$orinRow[$orinColumn] = $destColmnValue
+			}
+		}
+	}
+	Catch
+	{   
+		Write-Host "";
+		throw "There are Some issues while replacing commas with blank space, Please check the process and re-try" ;
+	}	
+
+	#Convert the File into CSV
+	Try
+	{
+		$dataTable | convertto-csv -NoTypeInformation | % { $_ -replace '"', ""} | out-file $WorkFileName -Force -encoding ASCII 	
+	}
+	Catch
+	{   
+		Write-Host "";
+		throw "Error while converting File($FILE) into CSV, Please check the process and re-try" ;
+	}	
+	
+	#Moving Converted File to Destination Folder
+	Try
+	{
+		Move-Item $WorkFileName $orinFileDstDir -Force;		
+	}
+	Catch
+	{   
+		Write-Host "";
+		throw "Error while Moving Source:$WorkFileName to Destination:$orinFileDstDir , Please check the process and re-try" ;
+	}				
+				
+	# Check whether the File Move is Success
+	if (Test-Path $NewFileName)
+	{
+		Remove-Item $SourceFile
+		Write-Host "";
+		Write-Host "**SUCCESSFULLY Converted (SOURCE:$FILE, DESTINATION:$NewFileName) and SOURCE_FILE DELETED** ";
+	}	
+						
+	# Moving further when File name is valid Ends
+}
+
+Write-Host "End Date: $(Get-Date)";
+Write-Host "";
+
+
+
+
+
+
+
+
+
